@@ -1,0 +1,17 @@
+{
+  "name": "feishu-opencode-bridge",
+  "version": "1.0.0",
+  "description": "Bridge between Feishu (Lark) IM and OpenCode AI coding agent",
+  "type": "module",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "node --watch src/index.js"
+  },
+  "dependencies": {
+    "@larksuiteoapi/node-sdk": "^1.4.0",
+    "@opencode-ai/sdk": "^1.0.0",
+    "dotenv": "^16.4.0",
+    "express": "^4.21.0"
+  }
+}
