@@ -1,15 +1,17 @@
 import { spawn } from "child_process";
 
-const MODEL = process.env.OPENCODE_MODEL || "opencode/big-pickle";
+const DEFAULT_MODEL = process.env.OPENCODE_MODEL || "opencode/big-pickle";
 
-export function runPrompt(text) {
+export function runPrompt(text, model, dir) {
+  const m = model || DEFAULT_MODEL;
+  const args = ["/c", "opencode", "run", "--format", "json", "-m", m];
+  if (dir) args.push("--dir", dir);
+  args.push(text);
+
   return new Promise((resolve, reject) => {
-    console.log(`[OpenCode] 执行: opencode run -m ${MODEL} "${text.slice(0, 50)}..."`);
-    
-    const child = spawn("opencode", ["run", "-m", MODEL, text], {
-      stdio: ["ignore", "pipe", "pipe"],
-      shell: true,
-    });
+    console.log(`[OpenCode] 执行: opencode run -m ${m}${dir ? ` --dir ${dir}` : ""} "${text.slice(0, 50)}..."`);
+
+    const child = spawn("cmd.exe", args, { stdio: ["ignore", "pipe", "pipe"], shell: false });
 
     let stdout = "";
     let stderr = "";
@@ -20,21 +22,34 @@ export function runPrompt(text) {
 
     child.stderr.on("data", (data) => {
       stderr += data.toString();
+      console.error(`[OpenCode] stderr: ${data.toString().slice(0, 200)}`);
     });
 
     child.on("close", (code) => {
+      clearTimeout(timer);
       console.log(`[OpenCode] 退出码: ${code}`);
-      console.log(`[OpenCode] stdout: ${stdout.slice(0, 200)}`);
 
-      // 过滤掉标题行和 ANSI 颜色代码
-      const lines = stdout.split("\n").filter(line => 
-        !line.startsWith(">") && 
-        !line.includes("·") &&
-        !line.includes("Skill") &&
-        line.trim() !== ""
-      );
-      const result = lines.join("\n").trim();
+      // 解析 JSON 事件流，提取所有 text 片段
+      const lines = stdout.split("\n").filter(Boolean);
+      const textParts = [];
+      for (const line of lines) {
+        try {
+          const event = JSON.parse(line);
+          if (event.type === "text" && event.part?.text) {
+            textParts.push(event.part.text);
+          }
+        } catch {}
+      }
+      const result = textParts.join("").trim();
       console.log(`[OpenCode] 结果: ${result.slice(0, 100)}`);
+
+      // 结果为空但有 stderr 错误时，提取关键错误信息返回
+      if (!result && stderr) {
+        const errLine = stderr.split("\n").find((l) => l.includes("Error:") || l.includes("error:")) || stderr.split("\n")[0];
+        resolve(`❌ ${errLine.trim()}`);
+        return;
+      }
+
       resolve(result);
     });
 
@@ -43,11 +58,24 @@ export function runPrompt(text) {
       reject(err);
     });
 
-    // 超时处理
-    setTimeout(() => {
-      child.kill();
-      reject(new Error("OpenCode 执行超时"));
-    }, 120000);
+    const timer = setTimeout(() => {
+      // Windows 上需要用 taskkill 杀掉整个进程树
+      try { spawn("taskkill", ["/pid", String(child.pid), "/f", "/t"], { shell: false }); } catch {}
+      reject(new Error("OpenCode 执行超时（300s）"));
+    }, 300000);
+  });
+}
+
+export function listModels() {
+  return new Promise((resolve, reject) => {
+    const child = spawn("cmd.exe", ["/c", "opencode", "models"], {
+      stdio: ["ignore", "pipe", "pipe"],
+      shell: false,
+    });
+    let stdout = "";
+    child.stdout.on("data", (d) => { stdout += d.toString(); });
+    child.on("close", () => resolve(stdout.trim().split("\n").map((l) => l.trim()).filter(Boolean)));
+    child.on("error", reject);
   });
 }
 
