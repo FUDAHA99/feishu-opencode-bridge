@@ -15,6 +15,8 @@ function safeJsonParse(str) {
   try { return JSON.parse(str); } catch { return null; }
 }
 
+const processedMessages = new Set();
+
 async function reply(messageId, text) {
   const http = new Client({ appId: FEISHU_APP_ID, appSecret: FEISHU_APP_SECRET });
   await http.im.message.reply({
@@ -43,10 +45,20 @@ async function main() {
         const message = data?.message;
         if (!message || message.message_type !== "text") return;
 
+        const messageId = message.message_id;
+        if (processedMessages.has(messageId)) {
+          console.log(`[去重] 跳过已处理消息: ${messageId}`);
+          return;
+        }
+        processedMessages.add(messageId);
+        if (processedMessages.size > 1000) {
+          const arr = [...processedMessages];
+          arr.slice(0, 500).forEach((id) => processedMessages.delete(id));
+        }
+
         const content = safeJsonParse(message.content);
         const text = content?.text || "";
         const openId = data?.sender?.sender_id?.open_id;
-        const messageId = message.message_id;
 
         console.log(`[消息] ${openId}: ${text}`);
 
