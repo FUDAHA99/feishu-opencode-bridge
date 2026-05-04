@@ -1,118 +1,113 @@
 import "dotenv/config";
-import express from "express";
-import { createFeishuClient } from "./feishu.js";
-import { initOpenCode } from "./opencode.js";
-import { handleMessage } from "./message-handler.js";
+import { WSClient, EventDispatcher, Client } from "@larksuiteoapi/node-sdk";
+import { runPrompt } from "./opencode.js";
+import { getUserSessionId, setUserSessionId, removeUserSession } from "./session-manager.js";
 
-const config = {
-  feishu: {
-    appId: process.env.FEISHU_APP_ID,
-    appSecret: process.env.FEISHU_APP_SECRET,
-    verificationToken: process.env.FEISHU_VERIFICATION_TOKEN,
-    encryptKey: process.env.FEISHU_ENCRYPT_KEY,
-    useWebSocket: process.env.FEISHU_USE_WS !== "false",
-  },
-  opencode: {
-    hostname: process.env.OPENCODE_HOSTNAME || "127.0.0.1",
-    port: parseInt(process.env.OPENCODE_PORT || "4096", 10),
-  },
-  http: {
-    port: parseInt(process.env.HTTP_PORT || "3000", 10),
-  },
-};
+const FEISHU_APP_ID = process.env.FEISHU_APP_ID;
+const FEISHU_APP_SECRET = process.env.FEISHU_APP_SECRET;
 
-function validateConfig() {
-  const missing = [];
-  if (!config.feishu.appId) missing.push("FEISHU_APP_ID");
-  if (!config.feishu.appSecret) missing.push("FEISHU_APP_SECRET");
-  if (!config.feishu.useWebSocket) {
-    if (!config.feishu.verificationToken) missing.push("FEISHU_VERIFICATION_TOKEN");
-  }
-  if (missing.length > 0) {
-    console.error(`❌ 缺少必要环境变量: ${missing.join(", ")}`);
-    console.error("请复制 .env.example 为 .env 并填写配置");
-    process.exit(1);
-  }
+if (!FEISHU_APP_ID || !FEISHU_APP_SECRET) {
+  console.error("❌ 缺少 FEISHU_APP_ID 或 FEISHU_APP_SECRET");
+  process.exit(1);
 }
 
-async function startWebSocketMode(feishu, opencodeClient) {
-  console.log("[启动] 使用 WebSocket 模式连接飞书...");
-
-  const eventDispatcher = feishu.client.eventDispatcher;
-
-  eventDispatcher.register({
-    "im.message.receive_v1": async (data) => {
-      try {
-        await handleMessage(feishu.client, opencodeClient, data);
-      } catch (err) {
-        console.error("[WebSocket] 消息处理错误:", err);
-      }
-    },
-  });
-
-  feishu.client.start();
-  console.log("[启动] WebSocket 已连接，等待飞书消息...");
+function safeJsonParse(str) {
+  try { return JSON.parse(str); } catch { return null; }
 }
 
-async function startHTTPMode(feishu, opencodeClient) {
-  console.log("[启动] 使用 HTTP 模式连接飞书...");
-
-  const app = express();
-  app.use(express.json());
-
-  app.get("/health", (req, res) => {
-    res.json({ status: "ok", timestamp: new Date().toISOString() });
-  });
-
-  app.post("/feishu/event", async (req, res) => {
-    const body = req.body;
-
-    if (body.challenge) {
-      console.log("[HTTP] 收到 URL 验证请求");
-      return res.json({ challenge: body.challenge });
-    }
-
-    if (body.header?.event_type === "im.message.receive_v1") {
-      try {
-        await handleMessage(feishu.client, opencodeClient, body.event);
-      } catch (err) {
-        console.error("[HTTP] 消息处理错误:", err);
-      }
-    }
-
-    res.json({ code: 0 });
-  });
-
-  app.listen(config.http.port, () => {
-    console.log(`[启动] HTTP 服务监听端口 ${config.http.port}`);
-    console.log(`[启动] 请在飞书开放平台设置事件订阅 URL: http://<你的公网IP或域名>:${config.http.port}/feishu/event`);
+async function reply(messageId, text) {
+  const http = new Client({ appId: FEISHU_APP_ID, appSecret: FEISHU_APP_SECRET });
+  await http.im.message.reply({
+    data: { content: JSON.stringify({ text }), msg_type: "text" },
+    path: { message_id: messageId },
   });
 }
 
 async function main() {
   console.log("🚀 Feishu-OpenCode Bridge 启动中...");
 
-  validateConfig();
+  const wsClient = new WSClient({
+    appId: FEISHU_APP_ID,
+    appSecret: FEISHU_APP_SECRET,
+  });
+  console.log("[飞书] WS 客户端初始化成功");
 
-  console.log(`[OpenCode] 连接到 ${config.opencode.hostname}:${config.opencode.port}`);
-  const opencode = await initOpenCode(config.opencode);
-  const client = opencode.client;
+  const eventDispatcher = new EventDispatcher({
+    encryptKey: process.env.FEISHU_ENCRYPT_KEY || "",
+    verificationToken: process.env.FEISHU_VERIFICATION_TOKEN || "",
+  });
 
-  console.log("[飞书] 初始化客户端...");
-  const feishu = createFeishuClient(config.feishu);
+  eventDispatcher.register({
+    "im.message.receive_v1": async (data) => {
+      try {
+        const message = data?.message;
+        if (!message || message.message_type !== "text") return;
 
-  if (feishu.type === "ws") {
-    await startWebSocketMode(feishu, client);
-  } else {
-    await startHTTPMode(feishu, client);
-  }
+        const content = safeJsonParse(message.content);
+        const text = content?.text || "";
+        const openId = data?.sender?.sender_id?.open_id;
+        const messageId = message.message_id;
 
-  console.log("✅ 桥接服务已就绪！在飞书中给机器人发消息即可使用 OpenCode。");
+        console.log(`[消息] ${openId}: ${text}`);
+
+        const cmd = text.toLowerCase().trim();
+        if (cmd === "/help" || cmd === "/帮助") {
+          await reply(messageId, "🤖 OpenCode 个人助理\n\n直接发送消息即可对话。\n\n命令：\n• /new — 新会话\n• /abort — 中止任务\n• /help — 帮助");
+          return;
+        }
+        if (cmd === "/new" || cmd === "/reset" || cmd === "/新会话") {
+          removeUserSession(openId);
+          await reply(messageId, "✅ 已重置");
+          return;
+        }
+
+        await reply(messageId, "🤔 思考中...");
+
+        const responseText = await runPrompt(text);
+        console.log(`[OpenCode] 回复: ${responseText.slice(0, 100)}`);
+
+        if (responseText) {
+          const chunks = splitLongMessage(responseText, 4000);
+          for (const chunk of chunks) {
+            await reply(messageId, chunk);
+          }
+        } else {
+          await reply(messageId, "✅ 已完成（无文本输出）");
+        }
+      } catch (err) {
+        console.error("[错误]", err.message);
+        try {
+          const msgId = data?.message?.message_id;
+          if (msgId) await reply(msgId, `❌ ${err.message}`);
+        } catch {}
+      }
+    },
+  });
+
+  console.log("[飞书] 启动 WebSocket 长连接...");
+  await wsClient.start({ eventDispatcher });
+
+  console.log("\n✅ 服务就绪！在飞书中给机器人发消息即可\n");
 
   process.on("SIGINT", () => {
-    console.log("\n👋 正在关闭服务...");
+    console.log("\n👋 关闭");
+    wsClient.close();
     process.exit(0);
   });
+}
+
+function splitLongMessage(text, maxLength) {
+  if (text.length <= maxLength) return [text];
+  const chunks = [];
+  let remaining = text;
+  while (remaining.length > maxLength) {
+    let splitAt = remaining.lastIndexOf("\n", maxLength);
+    if (splitAt === -1 || splitAt < maxLength / 2) splitAt = maxLength;
+    chunks.push(remaining.slice(0, splitAt));
+    remaining = remaining.slice(splitAt);
+  }
+  if (remaining.length > 0) chunks.push(remaining);
+  return chunks;
 }
 
 main().catch((err) => {

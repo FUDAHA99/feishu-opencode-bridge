@@ -1,59 +1,25 @@
-import { Client, WSClient } from "@larksuiteoapi/node-sdk";
-
-export function createFeishuClient(config) {
-  const {
-    appId,
-    appSecret,
-    verificationToken,
-    encryptKey,
-    useWebSocket = true,
-  } = config;
-
-  if (useWebSocket) {
-    const wsClient = new WSClient({
-      appId,
-      appSecret,
+export async function replyFeishuMessage(client, messageId, content) {
+  console.log(`[飞书] 回复消息: msgId="${messageId}" content="${content.slice(0,50)}..."`);
+  try {
+    const res = await client.im.message.reply({
+      data: {
+        content: JSON.stringify({ text: content }),
+        msg_type: "text",
+      },
+      path: {
+        message_id: messageId,
+      },
     });
-    return { type: "ws", client: wsClient };
+    console.log(`[飞书] 回复结果:`, JSON.stringify(res).slice(0, 300));
+    if (res?.code !== 0) {
+      throw new Error(`飞书回复失败: ${res?.msg || "未知错误"} (code: ${res?.code})`);
+    }
+  } catch (err) {
+    if (err.response?.data) {
+      console.error(`[飞书] API 错误:`, JSON.stringify(err.response.data));
+    }
+    throw err;
   }
-
-  const httpClient = new Client({
-    appId,
-    appSecret,
-    appType: "self-built",
-    verificationToken,
-    encryptKey,
-  });
-  return { type: "http", client: httpClient };
-}
-
-export async function replyFeishuMessage(feishuClient, messageId, content, msgType = "text") {
-  if (msgType === "text") {
-    const textContent = JSON.stringify({ text: content });
-    await feishuClient.im.message.reply({
-      message_id: messageId,
-      content: textContent,
-      msg_type: "text",
-    });
-  } else {
-    await feishuClient.im.message.reply({
-      message_id: messageId,
-      content: content,
-      msg_type: msgType,
-    });
-  }
-}
-
-export async function sendFeishuMessage(feishuClient, receiveId, content, receiveIdType = "open_id", msgType = "text") {
-  const textContent = msgType === "text" ? JSON.stringify({ text: content }) : content;
-  return await feishuClient.im.message.create({
-    params: { receive_id_type: receiveIdType },
-    data: {
-      receive_id: receiveId,
-      content: textContent,
-      msg_type: msgType,
-    },
-  });
 }
 
 export function extractTextFromFeishuEvent(event) {
